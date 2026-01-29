@@ -73,14 +73,33 @@ export class N8nClient {
     });
   }
 
-  async updateWorkflow(id: string, data: Partial<WorkflowData>): Promise<WorkflowData> {
+  async updateWorkflow(id: string, data: Partial<WorkflowData>, originalWorkflow?: WorkflowData): Promise<WorkflowData> {
     logger.info('Updating workflow', { workflowId: id });
 
     // n8n API expects only these fields, without 'id' in body
     const { id: _id, ...workflowData } = data as WorkflowData;
+
+    // CRITICAL: Preserve original credentials from each node
+    // n8n's API can break credentials if we send them back incorrectly
+    const nodesWithCredentials = workflowData.nodes?.map(node => {
+      // Find the original node to preserve its credentials
+      const originalNode = originalWorkflow?.nodes?.find(n => n.name === node.name || n.id === node.id);
+
+      // Remove credentials from the node we're sending - let n8n keep the existing ones
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      const { credentials: _creds, ...nodeWithoutCreds } = node;
+
+      // If original had credentials, keep the reference
+      if (originalNode?.credentials) {
+        return { ...nodeWithoutCreds, credentials: originalNode.credentials };
+      }
+
+      return nodeWithoutCreds;
+    });
+
     const payload = {
       name: workflowData.name,
-      nodes: workflowData.nodes,
+      nodes: nodesWithCredentials,
       connections: workflowData.connections,
       settings: workflowData.settings,
     };

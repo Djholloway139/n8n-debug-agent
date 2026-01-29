@@ -129,7 +129,8 @@ async function handleApproval(approvalId: string, payload: SlackActionPayload): 
     }
 
     // Update the workflow in n8n (send full workflow for PUT)
-    await n8nClient.updateWorkflow(record.workflowId, patchResult.patchedWorkflow!);
+    // Pass original workflow to preserve credentials
+    await n8nClient.updateWorkflow(record.workflowId, patchResult.patchedWorkflow!, record.originalWorkflow);
 
     // Update status to applied
     approvalStore.updateStatus(approvalId, 'applied');
