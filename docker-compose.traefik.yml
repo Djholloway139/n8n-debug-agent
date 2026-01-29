@@ -6,7 +6,7 @@ services:
     env_file:
       - .env
     networks:
-      - traefik_proxy
+      - root_default
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.n8n-debug-agent.rule=Host(`agents.rapiqual.com`)"
@@ -15,5 +15,5 @@ services:
       - "traefik.http.services.n8n-debug-agent.loadbalancer.server.port=3000"
 
 networks:
-  traefik_proxy:
+  root_default:
     external: true
