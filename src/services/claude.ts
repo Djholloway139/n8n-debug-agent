@@ -252,6 +252,133 @@ Use the provide_analysis tool to return your structured response.`;
 
     return prompt;
   }
+
+  async reviseFix(context: {
+    originalAnalysis: ErrorAnalysis;
+    userSuggestion: string;
+    errorPayload: import('../types/index.js').ErrorPayload;
+    workflow: import('../types/index.js').WorkflowData;
+  }): Promise<ErrorAnalysis> {
+    const { originalAnalysis, userSuggestion, errorPayload, workflow } = context;
+
+    logger.info('Revising fix based on user suggestion', {
+      workflowId: workflow.id,
+      suggestion: userSuggestion.slice(0, 100),
+    });
+
+    const prompt = `## Original Error
+
+**Workflow:** ${workflow.name}
+**Error:** ${errorPayload.errorMessage}
+**Node:** ${errorPayload.nodeName || 'Unknown'}
+
+## Original Analysis
+
+**Root Cause:** ${originalAnalysis.rootCause}
+**Explanation:** ${originalAnalysis.explanation}
+**Proposed Fix:** ${originalAnalysis.suggestedFix.description}
+**Changes:**
+${originalAnalysis.suggestedFix.changes.map((c) => `- [${c.changeType}] ${c.description}`).join('\n')}
+
+## User Feedback
+
+The user has provided the following suggestion or feedback on the proposed fix:
+
+"${userSuggestion}"
+
+## Workflow Structure
+
+**Nodes:**
+${workflow.nodes.map((n) => `- ${n.name} (${n.type})`).join('\n')}
+
+**Node Details for "${errorPayload.nodeName}":**
+\`\`\`json
+${JSON.stringify(workflow.nodes.find((n) => n.name === errorPayload.nodeName)?.parameters || {}, null, 2).slice(0, 1500)}
+\`\`\`
+
+## Task
+
+Based on the user's feedback, revise your analysis and proposed fix. Consider:
+1. Whether the user's suggestion addresses the root cause better
+2. How to incorporate their feedback into a concrete fix
+3. Any additional changes needed based on their insight
+
+Provide a revised analysis using the provide_analysis tool.`;
+
+    try {
+      const response = await this.client.messages.create({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 4096,
+        system: SYSTEM_PROMPT,
+        messages: [{ role: 'user', content: prompt }],
+        tools: [
+          {
+            name: 'provide_analysis',
+            description: 'Provide the revised error analysis and fix proposal',
+            input_schema: {
+              type: 'object',
+              properties: {
+                rootCause: { type: 'string', description: 'Technical root cause of the error' },
+                explanation: { type: 'string', description: 'User-friendly explanation of what went wrong' },
+                affectedNodes: { type: 'array', items: { type: 'string' }, description: 'Names of affected nodes' },
+                suggestedFix: {
+                  type: 'object',
+                  properties: {
+                    description: { type: 'string', description: 'Human-readable description of the fix' },
+                    changes: {
+                      type: 'array',
+                      items: {
+                        type: 'object',
+                        properties: {
+                          nodeName: { type: 'string' },
+                          changeType: { type: 'string', enum: ['modify_node', 'add_node', 'remove_node', 'modify_connection', 'modify_settings'] },
+                          path: { type: 'string' },
+                          newValue: {},
+                          description: { type: 'string' },
+                        },
+                        required: ['changeType', 'newValue', 'description'],
+                      },
+                    },
+                    rollbackPossible: { type: 'boolean' },
+                  },
+                  required: ['description', 'changes', 'rollbackPossible'],
+                },
+                confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
+                relatedSkills: { type: 'array', items: { type: 'string' } },
+              },
+              required: ['rootCause', 'explanation', 'affectedNodes', 'suggestedFix', 'confidence', 'relatedSkills'],
+            },
+          },
+        ],
+        tool_choice: { type: 'tool', name: 'provide_analysis' },
+      });
+
+      const toolUse = response.content.find((block) => block.type === 'tool_use');
+      if (!toolUse || toolUse.type !== 'tool_use') {
+        throw new Error('No tool use response from Claude');
+      }
+
+      const analysis = toolUse.input as ClaudeAnalysisResponse;
+      const fixId = uuidv4();
+
+      return {
+        rootCause: analysis.rootCause,
+        explanation: analysis.explanation,
+        affectedNodes: analysis.affectedNodes,
+        suggestedFix: {
+          id: fixId,
+          description: analysis.suggestedFix.description,
+          changes: analysis.suggestedFix.changes,
+          rollbackPossible: analysis.suggestedFix.rollbackPossible,
+        },
+        confidence: analysis.confidence,
+        relatedSkills: analysis.relatedSkills,
+      };
+    } catch (error) {
+      logger.error('Claude revision failed', { error: (error as Error).message });
+      throw error;
+    }
+  }
 }
 
 // Singleton instance

@@ -5,12 +5,14 @@ import { logger } from '../utils/logger.js';
 import { approvalStore } from '../services/approvalStore.js';
 import { slackClient } from '../services/slack.js';
 import { n8nClient } from '../services/n8n.js';
+import { claudeClient } from '../services/claude.js';
 import { applyFix, generatePatchDescription } from '../analyzers/fixGenerator.js';
 
 export const slackRouter = Router();
 
 interface SlackActionPayload {
   type: string;
+  trigger_id: string;
   user: {
     id: string;
     username: string;
@@ -30,10 +32,32 @@ interface SlackActionPayload {
   response_url: string;
 }
 
+interface SlackViewSubmissionPayload {
+  type: 'view_submission';
+  user: {
+    id: string;
+    username: string;
+    name: string;
+  };
+  view: {
+    callback_id: string;
+    private_metadata: string;
+    state: {
+      values: {
+        suggestion_input: {
+          suggestion_text: {
+            value: string;
+          };
+        };
+      };
+    };
+  };
+}
+
 // Slack sends actions as form-urlencoded with a 'payload' field
 slackRouter.post('/actions', async (req: Request, res: Response) => {
   // Parse the payload
-  let payload: SlackActionPayload;
+  let payload: SlackActionPayload | SlackViewSubmissionPayload;
   try {
     const rawPayload = req.body.payload;
     if (!rawPayload) {
@@ -52,11 +76,23 @@ slackRouter.post('/actions', async (req: Request, res: Response) => {
     return res.status(401).send('Invalid signature');
   }
 
-  // Acknowledge immediately
+  // Handle view submissions (modal form submissions)
+  if (payload.type === 'view_submission') {
+    // Acknowledge immediately for modals
+    res.status(200).send();
+
+    // Process the suggestion asynchronously
+    processSuggestion(payload as SlackViewSubmissionPayload).catch((error) => {
+      logger.error('Failed to process suggestion', { error: (error as Error).message });
+    });
+    return;
+  }
+
+  // Acknowledge immediately for button actions
   res.status(200).send();
 
   // Process the action asynchronously
-  processAction(payload).catch((error) => {
+  processAction(payload as SlackActionPayload).catch((error) => {
     logger.error('Failed to process Slack action', { error: (error as Error).message });
   });
 });
@@ -94,8 +130,67 @@ async function processAction(payload: SlackActionPayload): Promise<void> {
     await handleApproval(record.id, payload);
   } else if (actionId === 'reject_fix') {
     await handleRejection(record.id, payload);
+  } else if (actionId === 'suggest_fix') {
+    await handleSuggestFix(record.id, payload);
   } else {
     logger.warn('Unknown action', { actionId });
+  }
+}
+
+async function handleSuggestFix(approvalId: string, payload: SlackActionPayload): Promise<void> {
+  logger.info('Opening suggestion modal', { approvalId, user: payload.user.username });
+
+  await slackClient.openSuggestionModal(payload.trigger_id, approvalId);
+}
+
+async function processSuggestion(payload: SlackViewSubmissionPayload): Promise<void> {
+  const approvalId = payload.view.private_metadata;
+  const suggestion = payload.view.state.values.suggestion_input.suggestion_text.value;
+
+  logger.info('Processing user suggestion', { approvalId, user: payload.user.username });
+
+  const record = approvalStore.get(approvalId);
+  if (!record) {
+    logger.warn('Approval record not found for suggestion', { approvalId });
+    return;
+  }
+
+  try {
+    // Use Claude to analyze the suggestion and create a revised fix
+    const revisedAnalysis = await claudeClient.reviseFix({
+      originalAnalysis: record.analysis,
+      userSuggestion: suggestion,
+      errorPayload: record.errorPayload,
+      workflow: record.originalWorkflow,
+    });
+
+    // Update the approval record with the revised analysis
+    approvalStore.update(approvalId, {
+      analysis: revisedAnalysis,
+      proposal: revisedAnalysis.suggestedFix,
+    });
+
+    // Post the revised proposal to the thread
+    await slackClient.postRevisedProposal(
+      record.slackChannelId!,
+      record.slackMessageTs!,
+      approvalId,
+      suggestion,
+      revisedAnalysis.explanation,
+      revisedAnalysis.suggestedFix.changes.map((c, i) => `${i + 1}. [${c.changeType}] ${c.description}`).join('\n')
+    );
+
+    logger.info('Revised proposal posted', { approvalId });
+  } catch (error) {
+    logger.error('Failed to process suggestion', { approvalId, error: (error as Error).message });
+
+    // Notify user of failure in thread
+    await slackClient.updateMessage(
+      record.slackChannelId!,
+      record.slackMessageTs!,
+      'failed',
+      `Failed to process your suggestion: ${(error as Error).message}`
+    );
   }
 }
 

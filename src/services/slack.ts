@@ -172,6 +172,16 @@ export class SlackClient {
             type: 'button',
             text: {
               type: 'plain_text',
+              text: ':bulb: Suggest Fix',
+              emoji: true,
+            },
+            action_id: 'suggest_fix',
+            value: record.id,
+          },
+          {
+            type: 'button',
+            text: {
+              type: 'plain_text',
               text: ':x: Reject',
               emoji: true,
             },
@@ -230,6 +240,152 @@ export class SlackClient {
       logger.info('Slack status update sent', { channel, ts, status });
     } catch (error) {
       logger.error('Failed to update Slack message', { error: (error as Error).message });
+    }
+  }
+
+  async openSuggestionModal(triggerId: string, approvalId: string): Promise<void> {
+    const ready = await this.initialize();
+    if (!ready) return;
+
+    try {
+      await this.getApp().client.views.open({
+        trigger_id: triggerId,
+        view: {
+          type: 'modal',
+          callback_id: `suggestion_modal_${approvalId}`,
+          title: {
+            type: 'plain_text',
+            text: 'Suggest a Fix',
+          },
+          submit: {
+            type: 'plain_text',
+            text: 'Submit',
+          },
+          close: {
+            type: 'plain_text',
+            text: 'Cancel',
+          },
+          blocks: [
+            {
+              type: 'section',
+              text: {
+                type: 'mrkdwn',
+                text: 'Describe your suggested fix or provide feedback on the proposed solution:',
+              },
+            },
+            {
+              type: 'input',
+              block_id: 'suggestion_input',
+              element: {
+                type: 'plain_text_input',
+                action_id: 'suggestion_text',
+                multiline: true,
+                placeholder: {
+                  type: 'plain_text',
+                  text: 'e.g., "Instead of modifying the JSON body, try adding error handling around the HTTP request" or "The real issue is the API endpoint URL is wrong"',
+                },
+              },
+              label: {
+                type: 'plain_text',
+                text: 'Your Suggestion',
+              },
+            },
+          ],
+          private_metadata: approvalId,
+        },
+      });
+
+      logger.info('Suggestion modal opened', { approvalId });
+    } catch (error) {
+      logger.error('Failed to open suggestion modal', { error: (error as Error).message });
+    }
+  }
+
+  async postRevisedProposal(
+    channel: string,
+    threadTs: string,
+    approvalId: string,
+    userSuggestion: string,
+    revisedAnalysis: string,
+    revisedChanges: string
+  ): Promise<void> {
+    const ready = await this.initialize();
+    if (!ready) return;
+
+    try {
+      await this.getApp().client.chat.postMessage({
+        channel,
+        thread_ts: threadTs,
+        text: 'Revised fix proposal based on your feedback',
+        blocks: [
+          {
+            type: 'section',
+            text: {
+              type: 'mrkdwn',
+              text: `:speech_balloon: *Your Suggestion:*\n>${userSuggestion.split('\n').join('\n>')}`,
+            },
+          },
+          {
+            type: 'divider',
+          },
+          {
+            type: 'section',
+            text: {
+              type: 'mrkdwn',
+              text: `:robot_face: *Revised Analysis:*\n${revisedAnalysis}`,
+            },
+          },
+          {
+            type: 'section',
+            text: {
+              type: 'mrkdwn',
+              text: `*Revised Changes:*\n${revisedChanges}`,
+            },
+          },
+          {
+            type: 'actions',
+            block_id: `revised_approval_${approvalId}`,
+            elements: [
+              {
+                type: 'button',
+                text: {
+                  type: 'plain_text',
+                  text: ':white_check_mark: Approve Revised Fix',
+                  emoji: true,
+                },
+                style: 'primary',
+                action_id: 'approve_fix',
+                value: approvalId,
+              },
+              {
+                type: 'button',
+                text: {
+                  type: 'plain_text',
+                  text: ':bulb: Suggest Another Fix',
+                  emoji: true,
+                },
+                action_id: 'suggest_fix',
+                value: approvalId,
+              },
+              {
+                type: 'button',
+                text: {
+                  type: 'plain_text',
+                  text: ':x: Reject',
+                  emoji: true,
+                },
+                style: 'danger',
+                action_id: 'reject_fix',
+                value: approvalId,
+              },
+            ],
+          },
+        ],
+      });
+
+      logger.info('Revised proposal posted', { approvalId, channel });
+    } catch (error) {
+      logger.error('Failed to post revised proposal', { error: (error as Error).message });
     }
   }
 
