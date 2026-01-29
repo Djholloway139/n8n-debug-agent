@@ -3,11 +3,9 @@ import { config } from '../utils/config.js';
 import { logger } from '../utils/logger.js';
 import type { N8nSkill, SkillsCache } from '../types/index.js';
 
-const SKILLS_REPO_URL = 'https://api.github.com/repos/n8n-io/n8n-docs/contents/docs/integrations/builtin';
-const RAW_CONTENT_BASE = 'https://raw.githubusercontent.com/n8n-io/n8n-docs/main/docs/integrations/builtin';
-
-// Alternative: n8n-skills repository if it exists
-const N8N_SKILLS_REPO = 'https://api.github.com/repos/n8n-io/n8n/contents/packages/nodes-base/nodes';
+// Use the curated n8n-skills repo
+const SKILLS_REPO_API = 'https://api.github.com/repos/czlonkowski/n8n-skills/contents/skills';
+const RAW_CONTENT_BASE = 'https://raw.githubusercontent.com/czlonkowski/n8n-skills/main/skills';
 
 let skillsCache: SkillsCache | null = null;
 
@@ -17,6 +15,38 @@ interface GitHubContent {
   type: 'file' | 'dir';
   download_url?: string;
 }
+
+// Map of skill names to relevant node types and error patterns
+const SKILL_RELEVANCE: Record<string, { nodeTypes: string[]; errorPatterns: string[] }> = {
+  'n8n-code-javascript': {
+    nodeTypes: ['n8n-nodes-base.code', 'n8n-nodes-base.function', 'n8n-nodes-base.functionItem'],
+    errorPatterns: ['javascript', 'script', 'syntax error', 'referenceerror', 'typeerror', 'undefined'],
+  },
+  'n8n-code-python': {
+    nodeTypes: ['n8n-nodes-base.code'],
+    errorPatterns: ['python', 'indentation', 'nameerror', 'attributeerror'],
+  },
+  'n8n-expression-syntax': {
+    nodeTypes: [], // Applies to all nodes with expressions
+    errorPatterns: ['expression', 'syntax', '{{', '}}', '$json', '$item', 'cannot read property'],
+  },
+  'n8n-mcp-tools-expert': {
+    nodeTypes: ['n8n-nodes-base.mcp'],
+    errorPatterns: ['mcp', 'tool', 'model context'],
+  },
+  'n8n-node-configuration': {
+    nodeTypes: [], // Applies to all nodes
+    errorPatterns: ['configuration', 'parameter', 'required', 'missing', 'invalid'],
+  },
+  'n8n-validation-expert': {
+    nodeTypes: ['n8n-nodes-base.if', 'n8n-nodes-base.switch', 'n8n-nodes-base.filter'],
+    errorPatterns: ['validation', 'invalid', 'type', 'format', 'schema'],
+  },
+  'n8n-workflow-patterns': {
+    nodeTypes: [], // Applies to workflow-level issues
+    errorPatterns: ['workflow', 'connection', 'loop', 'trigger', 'execution'],
+  },
+};
 
 export class SkillsService {
   private cacheTtl: number;
@@ -32,18 +62,32 @@ export class SkillsService {
       return skillsCache.skills;
     }
 
-    logger.info('Fetching n8n skills from GitHub');
+    logger.info('Fetching n8n skills from czlonkowski/n8n-skills repo');
 
     try {
       const skills: N8nSkill[] = [];
 
-      // Fetch core node documentation
-      const coreNodes = await this.fetchNodeDocs('core-nodes');
-      skills.push(...coreNodes);
+      // Fetch list of skill directories
+      const response = await axios.get<GitHubContent[]>(SKILLS_REPO_API, {
+        headers: {
+          'Accept': 'application/vnd.github.v3+json',
+        },
+        timeout: 30000,
+      });
 
-      // Fetch app nodes documentation
-      const appNodes = await this.fetchNodeDocs('app-nodes');
-      skills.push(...appNodes);
+      const skillDirs = response.data.filter((item) => item.type === 'dir');
+
+      // Fetch each skill's content
+      for (const dir of skillDirs) {
+        try {
+          const skill = await this.fetchSkill(dir.name);
+          if (skill) {
+            skills.push(skill);
+          }
+        } catch (error) {
+          logger.debug('Failed to fetch skill', { skill: dir.name, error: (error as Error).message });
+        }
+      }
 
       // Update cache
       const now = new Date();
@@ -68,141 +112,96 @@ export class SkillsService {
     }
   }
 
-  private async fetchNodeDocs(category: string): Promise<N8nSkill[]> {
-    const skills: N8nSkill[] = [];
-
+  private async fetchSkill(skillName: string): Promise<N8nSkill | null> {
     try {
-      const response = await axios.get<GitHubContent[]>(`${SKILLS_REPO_URL}/${category}`, {
-        headers: {
-          'Accept': 'application/vnd.github.v3+json',
-        },
-        timeout: 30000,
-      });
+      // Fetch the main SKILL.md file
+      const skillUrl = `${RAW_CONTENT_BASE}/${skillName}/SKILL.md`;
+      const skillResponse = await axios.get<string>(skillUrl, { timeout: 10000 });
+      const skillContent = skillResponse.data;
 
-      const directories = response.data.filter((item) => item.type === 'dir');
-
-      // Fetch content for each node (limit to avoid rate limiting)
-      const limitedDirs = directories.slice(0, 50);
-
-      for (const dir of limitedDirs) {
-        try {
-          const skill = await this.fetchNodeSkill(category, dir.name);
-          if (skill) {
-            skills.push(skill);
-          }
-        } catch {
-          // Skip individual failures
-          logger.debug('Failed to fetch skill', { node: dir.name });
-        }
+      // Also try to fetch README.md for description
+      let description = '';
+      try {
+        const readmeUrl = `${RAW_CONTENT_BASE}/${skillName}/README.md`;
+        const readmeResponse = await axios.get<string>(readmeUrl, { timeout: 10000 });
+        // Extract first paragraph as description
+        const firstPara = readmeResponse.data.split('\n\n')[1] || readmeResponse.data.split('\n')[0];
+        description = firstPara.replace(/^#+\s*/, '').slice(0, 200);
+      } catch {
+        // Use skill name as description if README fails
+        description = `n8n skill: ${skillName.replace(/-/g, ' ')}`;
       }
-    } catch (error) {
-      logger.warn(`Failed to fetch ${category} docs`, { error: (error as Error).message });
-    }
 
-    return skills;
-  }
-
-  private async fetchNodeSkill(category: string, nodeName: string): Promise<N8nSkill | null> {
-    try {
-      // Try to fetch the index.md or common operations file
-      const indexUrl = `${RAW_CONTENT_BASE}/${category}/${nodeName}/index.md`;
-
-      const response = await axios.get<string>(indexUrl, {
-        timeout: 10000,
-      });
-
-      const content = response.data;
-
-      // Extract description from markdown
-      const descriptionMatch = content.match(/description:\s*(.+)/);
-      const description = descriptionMatch ? descriptionMatch[1].trim() : `${nodeName} node documentation`;
+      // Get relevance mapping
+      const relevance = SKILL_RELEVANCE[skillName] || { nodeTypes: [], errorPatterns: [] };
 
       return {
-        name: nodeName,
+        name: skillName,
         description,
-        content: content.slice(0, 5000), // Limit content size
-        nodeTypes: [this.normalizeNodeType(nodeName)],
-        errorPatterns: this.extractErrorPatterns(content),
+        content: skillContent,
+        nodeTypes: relevance.nodeTypes,
+        errorPatterns: relevance.errorPatterns,
       };
     } catch {
       return null;
     }
   }
 
-  private normalizeNodeType(nodeName: string): string {
-    // Convert directory name to n8n node type format
-    // e.g., "http-request" -> "n8n-nodes-base.httpRequest"
-    const camelCase = nodeName.replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
-    return `n8n-nodes-base.${camelCase}`;
-  }
-
-  private extractErrorPatterns(content: string): string[] {
-    const patterns: string[] = [];
-
-    // Look for common error-related sections
-    const errorSections = content.match(/(?:error|troubleshoot|common issues)[^\n]*\n([\s\S]*?)(?=\n##|\n$)/gi);
-
-    if (errorSections) {
-      for (const section of errorSections) {
-        // Extract bullet points or error messages
-        const bullets = section.match(/[-*]\s*(.+)/g);
-        if (bullets) {
-          patterns.push(...bullets.map((b) => b.replace(/^[-*]\s*/, '')));
-        }
-      }
-    }
-
-    return patterns.slice(0, 10); // Limit patterns
-  }
-
   filterSkillsForError(skills: N8nSkill[], nodeType?: string, errorMessage?: string): N8nSkill[] {
     if (!nodeType && !errorMessage) {
-      return skills.slice(0, 5); // Return top 5 general skills
+      // Return most generally useful skills
+      const prioritySkills = ['n8n-node-configuration', 'n8n-expression-syntax', 'n8n-workflow-patterns'];
+      return skills.filter((s) => prioritySkills.includes(s.name)).slice(0, 3);
     }
 
-    const relevantSkills: N8nSkill[] = [];
+    const scoredSkills: Array<N8nSkill & { score: number }> = [];
+    const errorLower = errorMessage?.toLowerCase() || '';
+    const nodeTypeLower = nodeType?.toLowerCase() || '';
 
     for (const skill of skills) {
       let score = 0;
 
-      // Check if node type matches
-      if (nodeType && skill.nodeTypes?.some((nt) => nodeType.toLowerCase().includes(nt.toLowerCase().split('.').pop() || ''))) {
-        score += 10;
+      // Check node type match
+      if (nodeType && skill.nodeTypes) {
+        for (const nt of skill.nodeTypes) {
+          if (nodeTypeLower.includes(nt.toLowerCase().split('.').pop() || '')) {
+            score += 10;
+            break;
+          }
+        }
       }
 
-      // Check if skill name matches node type
-      if (nodeType && nodeType.toLowerCase().includes(skill.name.toLowerCase().replace(/-/g, ''))) {
-        score += 5;
-      }
-
-      // Check error patterns
+      // Check error pattern match
       if (errorMessage && skill.errorPatterns) {
         for (const pattern of skill.errorPatterns) {
-          if (errorMessage.toLowerCase().includes(pattern.toLowerCase())) {
-            score += 3;
+          if (errorLower.includes(pattern.toLowerCase())) {
+            score += 5;
           }
         }
       }
 
-      // Check content for error message keywords
-      if (errorMessage) {
-        const keywords = errorMessage.split(/\s+/).filter((w) => w.length > 4);
-        for (const keyword of keywords.slice(0, 5)) {
-          if (skill.content.toLowerCase().includes(keyword.toLowerCase())) {
-            score += 1;
-          }
+      // Check skill name relevance
+      const skillNameWords = skill.name.split('-').filter((w) => w !== 'n8n');
+      for (const word of skillNameWords) {
+        if (errorLower.includes(word) || nodeTypeLower.includes(word)) {
+          score += 2;
         }
+      }
+
+      // Always include node-configuration as it's generally useful
+      if (skill.name === 'n8n-node-configuration' && score === 0) {
+        score = 1;
       }
 
       if (score > 0) {
-        relevantSkills.push({ ...skill, score } as N8nSkill & { score: number });
+        scoredSkills.push({ ...skill, score });
       }
     }
 
     // Sort by score and return top results
-    return relevantSkills
-      .sort((a, b) => ((b as N8nSkill & { score: number }).score || 0) - ((a as N8nSkill & { score: number }).score || 0))
-      .slice(0, 5);
+    return scoredSkills
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 3);
   }
 
   clearCache(): void {
