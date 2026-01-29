@@ -101,10 +101,14 @@ debugRouter.post('/', async (req: DebugRequest, res: Response<DebugResult>) => {
     log.info('Sending approval request to Slack');
     try {
       const slackMessage = await slackClient.sendProposal(approvalRecord);
-      approvalStore.update(approvalId, {
-        slackMessageTs: slackMessage.ts,
-        slackChannelId: slackMessage.channel,
-      });
+      if (slackMessage) {
+        approvalStore.update(approvalId, {
+          slackMessageTs: slackMessage.ts,
+          slackChannelId: slackMessage.channel,
+        });
+      } else {
+        log.warn('Slack not configured, approval stored but no notification sent');
+      }
     } catch (slackError) {
       log.error('Failed to send Slack message', { error: (slackError as Error).message });
       // Continue anyway - the fix is still in the approval store

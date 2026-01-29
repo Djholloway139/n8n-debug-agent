@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install)",
+      "Bash(source ~/.zshrc)",
+      "Bash(source ~/.bashrc)",
+      "Bash(npm --version:*)",
+      "Bash(npm run dev)",
+      "Bash(node:*)",
+      "Bash(npm run build:*)",
+      "Bash(curl:*)",
+      "Bash(openssl rand:*)"
+    ]
+  }
+}

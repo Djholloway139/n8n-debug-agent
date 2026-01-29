@@ -6,38 +6,48 @@ import { logger } from '../utils/logger.js';
 import type { ErrorAnalysis, ApprovalRecord } from '../types/index.js';
 
 export class SlackClient {
-  private app: AppType;
+  private app: AppType | null = null;
   private initialized = false;
+  private initError: string | null = null;
 
-  constructor() {
-    this.app = new App({
-      token: config.slackBotToken,
-      signingSecret: config.slackSigningSecret,
-      logLevel: config.nodeEnv === 'production' ? LogLevel.INFO : LogLevel.DEBUG,
-    });
+  private getApp(): AppType {
+    if (!this.app) {
+      this.app = new App({
+        token: config.slackBotToken,
+        signingSecret: config.slackSigningSecret,
+        logLevel: config.nodeEnv === 'production' ? LogLevel.INFO : LogLevel.DEBUG,
+      });
+    }
+    return this.app;
   }
 
-  async initialize(): Promise<void> {
-    if (this.initialized) return;
+  async initialize(): Promise<boolean> {
+    if (this.initialized) return true;
+    if (this.initError) return false;
 
     try {
-      // Test the connection
-      const result = await this.app.client.auth.test();
+      const result = await this.getApp().client.auth.test();
       logger.info('Slack connection established', { botId: result.bot_id, team: result.team });
       this.initialized = true;
+      return true;
     } catch (error) {
-      logger.error('Failed to initialize Slack', { error: (error as Error).message });
-      throw error;
+      this.initError = (error as Error).message;
+      logger.error('Failed to initialize Slack - proposals will not be sent', { error: this.initError });
+      return false;
     }
   }
 
-  async sendProposal(record: ApprovalRecord): Promise<{ ts: string; channel: string }> {
-    await this.initialize();
+  async sendProposal(record: ApprovalRecord): Promise<{ ts: string; channel: string } | null> {
+    const ready = await this.initialize();
+    if (!ready) {
+      logger.warn('Slack not available, skipping proposal', { approvalId: record.id });
+      return null;
+    }
 
     const blocks = this.formatProposalBlocks(record);
 
     try {
-      const result = await this.app.client.chat.postMessage({
+      const result = await this.getApp().client.chat.postMessage({
         channel: config.slackChannelId,
         text: `Fix proposal for workflow: ${record.workflowName}`,
         blocks,
@@ -193,7 +203,8 @@ export class SlackClient {
     status: 'approved' | 'rejected' | 'applied' | 'failed',
     additionalInfo?: string
   ): Promise<void> {
-    await this.initialize();
+    const ready = await this.initialize();
+    if (!ready) return;
 
     const statusEmoji = {
       approved: ':hourglass_flowing_sand:',
@@ -210,7 +221,7 @@ export class SlackClient {
     };
 
     try {
-      await this.app.client.chat.postMessage({
+      await this.getApp().client.chat.postMessage({
         channel,
         thread_ts: ts,
         text: `${statusEmoji[status]} *Status Update:* ${statusText[status]}${additionalInfo ? `\n${additionalInfo}` : ''}`,
@@ -222,8 +233,12 @@ export class SlackClient {
     }
   }
 
-  getApp(): AppType {
+  getBoltApp(): AppType | null {
     return this.app;
+  }
+
+  isReady(): boolean {
+    return this.initialized;
   }
 }
 
