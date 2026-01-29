@@ -11,7 +11,7 @@ services:
       - "traefik.enable=true"
       - "traefik.http.routers.n8n-debug-agent.rule=Host(`agents.rapiqual.com`)"
       - "traefik.http.routers.n8n-debug-agent.entrypoints=websecure"
-      - "traefik.http.routers.n8n-debug-agent.tls.certresolver=myresolver"
+      - "traefik.http.routers.n8n-debug-agent.tls.certresolver=mytlschallenge"
       - "traefik.http.services.n8n-debug-agent.loadbalancer.server.port=3000"
 
 networks:
