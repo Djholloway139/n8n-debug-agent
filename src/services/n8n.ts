@@ -26,6 +26,7 @@ export class N8nClient {
           status: error.response?.status,
           message: error.message,
           url: error.config?.url,
+          responseData: error.response?.data,
         });
         throw error;
       }
@@ -75,9 +76,19 @@ export class N8nClient {
   async updateWorkflow(id: string, data: Partial<WorkflowData>): Promise<WorkflowData> {
     logger.info('Updating workflow', { workflowId: id });
 
+    // n8n API expects only these fields, without 'id' in body
+    const { id: _id, ...workflowData } = data as WorkflowData;
+    const payload = {
+      name: workflowData.name,
+      nodes: workflowData.nodes,
+      connections: workflowData.connections,
+      settings: workflowData.settings,
+    };
+
+    logger.debug('Sending workflow update', { workflowId: id, nodeCount: payload.nodes?.length });
+
     return this.withRetry(async () => {
-      // n8n API requires PUT for workflow updates
-      const response = await this.client.put<WorkflowData>(`/workflows/${id}`, data);
+      const response = await this.client.put<WorkflowData>(`/workflows/${id}`, payload);
       return response.data;
     });
   }
