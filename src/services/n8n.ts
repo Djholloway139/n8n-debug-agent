@@ -76,7 +76,8 @@ export class N8nClient {
     logger.info('Updating workflow', { workflowId: id });
 
     return this.withRetry(async () => {
-      const response = await this.client.patch<WorkflowData>(`/workflows/${id}`, data);
+      // n8n API requires PUT for workflow updates
+      const response = await this.client.put<WorkflowData>(`/workflows/${id}`, data);
       return response.data;
     });
   }

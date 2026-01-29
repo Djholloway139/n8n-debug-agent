@@ -128,12 +128,8 @@ async function handleApproval(approvalId: string, payload: SlackActionPayload): 
       throw new Error(patchResult.error || 'Failed to generate patch');
     }
 
-    // Update the workflow in n8n
-    await n8nClient.updateWorkflow(record.workflowId, {
-      nodes: patchResult.patchedWorkflow!.nodes,
-      connections: patchResult.patchedWorkflow!.connections,
-      settings: patchResult.patchedWorkflow!.settings,
-    });
+    // Update the workflow in n8n (send full workflow for PUT)
+    await n8nClient.updateWorkflow(record.workflowId, patchResult.patchedWorkflow!);
 
     // Update status to applied
     approvalStore.updateStatus(approvalId, 'applied');
