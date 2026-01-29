@@ -10,13 +10,12 @@ import { bearerAuth } from './middleware/auth.js';
 const app = express();
 
 // Store raw body for Slack signature verification
-app.use(express.json({
-  verify: (req: Request & { rawBody?: string }, _res, buf) => {
-    req.rawBody = buf.toString();
-  },
-}));
+const captureRawBody = (req: Request & { rawBody?: string }, _res: Response, buf: Buffer) => {
+  req.rawBody = buf.toString();
+};
 
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ verify: captureRawBody }));
+app.use(express.urlencoded({ extended: true, verify: captureRawBody }));
 
 // Add request ID to all requests
 app.use((req: Request & { requestId?: string }, _res: Response, next: NextFunction) => {
