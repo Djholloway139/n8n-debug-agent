@@ -31,6 +31,7 @@ interface AnalysisContext {
   errorPayload: ErrorPayload;
   workflow: WorkflowData;
   skills: N8nSkill[];
+  nodeDocumentation?: string;
 }
 
 interface ClaudeAnalysisResponse {
@@ -174,7 +175,7 @@ export class ClaudeClient {
   }
 
   private buildPrompt(context: AnalysisContext): string {
-    const { errorPayload, workflow, skills } = context;
+    const { errorPayload, workflow, skills, nodeDocumentation } = context;
 
     let prompt = `## Error Information
 
@@ -238,6 +239,12 @@ export class ClaudeClient {
           prompt += `${skill.content.slice(0, 500)}...\n\n`;
         }
       }
+    }
+
+    // Add MCP node documentation if available
+    if (nodeDocumentation) {
+      prompt += `\n## Node Documentation (from n8n MCP)\n\n`;
+      prompt += `${nodeDocumentation}\n\n`;
     }
 
     prompt += `\n## Task

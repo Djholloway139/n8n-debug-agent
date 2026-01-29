@@ -4,6 +4,7 @@ import { logger, createRequestLogger } from '../utils/logger.js';
 import { n8nClient } from '../services/n8n.js';
 import { claudeClient } from '../services/claude.js';
 import { skillsService } from '../services/skills.js';
+import { mcpService } from '../services/mcp.js';
 import { slackClient } from '../services/slack.js';
 import { approvalStore } from '../services/approvalStore.js';
 import { parseError } from '../analyzers/errorParser.js';
@@ -70,12 +71,24 @@ debugRouter.post('/', async (req: DebugRequest, res: Response<DebugResult>) => {
     );
     log.debug('Skills filtered', { count: relevantSkills.length });
 
+    // Fetch node documentation from MCP (if available)
+    let nodeDocumentation: string | undefined;
+    if (parsedError.nodeType) {
+      log.info('Fetching node documentation from MCP', { nodeType: parsedError.nodeType });
+      const mcpDoc = await mcpService.getNodeDocumentation(parsedError.nodeType);
+      if (mcpDoc?.documentation) {
+        nodeDocumentation = mcpDoc.documentation;
+        log.debug('MCP documentation fetched', { nodeType: parsedError.nodeType, docLength: nodeDocumentation.length });
+      }
+    }
+
     // Analyze error with Claude
     log.info('Analyzing error with Claude');
     const analysis = await claudeClient.analyzeError({
       errorPayload: payload,
       workflow,
       skills: relevantSkills,
+      nodeDocumentation,
     });
 
     log.info('Analysis complete', {

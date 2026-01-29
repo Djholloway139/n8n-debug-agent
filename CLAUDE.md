@@ -38,7 +38,8 @@ Autonomous n8n workflow debugging agent that:
 ### 1. Error Analysis
 - Receives error payloads from n8n error workflows
 - Fetches workflow JSON from n8n API
-- Fetches relevant n8n documentation from GitHub (cached 1 hour)
+- Fetches relevant n8n skills from czlonkowski/n8n-skills repo (cached 1 hour)
+- Fetches node documentation from n8n MCP server (when available)
 - Analyzes with Claude to identify root cause and propose fix
 
 ### 2. Slack Approval Workflow
@@ -69,7 +70,8 @@ src/
 │   ├── n8n.ts                  # n8n API client (GET/PUT workflows)
 │   ├── claude.ts               # Claude API (analyzeError, reviseFix)
 │   ├── slack.ts                # Slack messaging, modals, threads
-│   ├── skills.ts               # n8n docs fetcher with caching
+│   ├── skills.ts               # n8n-skills fetcher (czlonkowski/n8n-skills)
+│   ├── mcp.ts                  # n8n MCP server client for node docs
 │   └── approvalStore.ts        # In-memory approval tracking (TTL 24h)
 ├── routes/
 │   ├── debug.ts                # POST /debug - main entry point
@@ -103,6 +105,9 @@ ANTHROPIC_API_KEY=sk-ant-...
 # n8n API
 N8N_API_URL=https://workflows.rapiqual.com/api/v1
 N8N_API_KEY=eyJ...
+
+# n8n MCP (optional - defaults to hosted service)
+N8N_MCP_URL=https://dashboard.n8n-mcp.com/api
 
 # Slack (dedicated "n8n Debug Agent" app)
 SLACK_BOT_TOKEN=xoxb-...
@@ -161,6 +166,34 @@ In n8n, create an Error Workflow with an HTTP Request node:
   - Name: `Authorization`
   - Value: `Bearer 125fddeeef17a12388fd7ac7050a153e43e1420cf36f47b2536613af781aa05d`
 - **Body:** JSON with expressions mapping error data
+
+## Context Sources
+
+### n8n Skills (czlonkowski/n8n-skills)
+The agent fetches curated skills from https://github.com/czlonkowski/n8n-skills:
+- `n8n-code-javascript` - JavaScript/Code node debugging
+- `n8n-code-python` - Python code node issues
+- `n8n-expression-syntax` - Expression syntax errors ($json, $item, etc.)
+- `n8n-mcp-tools-expert` - MCP tool integration
+- `n8n-node-configuration` - General node config issues
+- `n8n-validation-expert` - Data validation problems
+- `n8n-workflow-patterns` - Workflow-level issues
+
+Skills are cached for 1 hour and filtered by relevance to the error type/node.
+
+### n8n MCP Server
+The agent queries the n8n MCP server for detailed node documentation:
+- **Hosted URL:** `https://dashboard.n8n-mcp.com/api`
+- **Local URL:** Configurable via `N8N_MCP_URL` env var
+- **Methods:** `get_node`, `search_nodes`, `get_node_examples`
+
+MCP provides:
+- Node property definitions
+- Available operations
+- Configuration examples
+- Best practices
+
+MCP failures are non-blocking - the agent continues without node docs if unavailable.
 
 ## Known Issues & Fixes Applied
 
