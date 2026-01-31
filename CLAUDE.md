@@ -45,9 +45,13 @@ Autonomous n8n workflow debugging agent that:
 ### 2. Slack Approval Workflow
 - Posts interactive message with error analysis and proposed fix
 - Three action buttons: Approve & Apply, Suggest Fix, Reject
-- **Suggest Fix** opens a modal for user feedback
-- Iterative conversation - user can refine fix multiple times
-- Revised proposals posted in thread with same action buttons
+- **Suggest Fix** opens a conversational chat flow:
+  1. User asks a question (e.g., "Does GitHub node have Continue on Fail?")
+  2. Agent replies with answer grounded in n8n documentation
+  3. User can continue chatting or click "Request New Proposal"
+  4. New proposal is generated using full conversation context
+- Skills and MCP documentation are stored with each approval for use in revisions
+- Prevents Claude from suggesting non-existent n8n features
 
 ### 3. Workflow Updates
 - Applies fixes via n8n PUT API
@@ -68,11 +72,11 @@ src/
 │   └── logger.ts               # Winston JSON logging
 ├── services/
 │   ├── n8n.ts                  # n8n API client (GET/PUT workflows)
-│   ├── claude.ts               # Claude API (analyzeError, reviseFix)
-│   ├── slack.ts                # Slack messaging, modals, threads
+│   ├── claude.ts               # Claude API (analyzeError, reviseFix, generateConversationReply)
+│   ├── slack.ts                # Slack messaging, modals, conversation UI, threads
 │   ├── skills.ts               # n8n-skills fetcher (czlonkowski/n8n-skills)
 │   ├── mcp.ts                  # n8n MCP server client for node docs
-│   └── approvalStore.ts        # In-memory approval tracking (TTL 24h)
+│   └── approvalStore.ts        # In-memory approval tracking (TTL 24h, stores skills/docs/conversation)
 ├── routes/
 │   ├── debug.ts                # POST /debug - main entry point
 │   └── slack.ts                # POST /slack/actions - button/modal handlers
@@ -195,6 +199,22 @@ MCP provides:
 
 MCP failures are non-blocking - the agent continues without node docs if unavailable.
 
+### Conversation Flow (Suggest Fix)
+When a user clicks "Suggest Fix", they enter a conversation mode:
+
+1. **User asks a question** - Modal opens for user to type a message
+2. **Agent generates reply** - Uses `generateConversationReply()` with skills/MCP docs context
+3. **Reply posted to thread** - Shows user message, agent reply, and relevant documentation
+4. **Action buttons offered:**
+   - `Continue Chat` - Opens modal to continue conversation
+   - `Request New Proposal` - Opens modal to request revised fix using conversation context
+   - `Approve Current` - Approves the original/current proposal
+   - `Reject` - Rejects and closes
+
+The conversation history is stored in `ApprovalRecord.conversationHistory` and passed to Claude when generating new proposals via `reviseFix()`.
+
+**Key benefit:** Prevents Claude from inventing non-existent n8n features by grounding all responses in the actual documentation (skills + MCP node docs).
+
 ## Known Issues & Fixes Applied
 
 ### 1. Credential Preservation (CRITICAL)
@@ -209,6 +229,11 @@ MCP failures are non-blocking - the agent continues without node docs if unavail
 ### 3. n8n API Method
 - **Issue:** n8n requires PUT (not PATCH) for workflow updates
 - **Fix:** Changed `client.patch()` to `client.put()` in n8n.ts
+
+### 4. Skills/MCP Not Used in Revisions (FIXED)
+- **Issue:** When user clicked "Suggest Fix", the `reviseFix()` method didn't receive n8n skills or MCP node documentation, causing Claude to suggest impossible solutions (like non-existent node options)
+- **Fix:** Skills and nodeDocumentation are now stored in ApprovalRecord and passed to both `reviseFix()` and new `generateConversationReply()` method
+- **Code:** ApprovalRecord extended with `skills`, `nodeDocumentation`, and `conversationHistory` fields
 
 ## Potential Next Steps
 
