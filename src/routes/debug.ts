@@ -108,6 +108,8 @@ debugRouter.post('/', async (req: DebugRequest, res: Response<DebugResult>) => {
       analysis,
       proposal: analysis.suggestedFix,
       originalWorkflow: workflow,
+      skills: relevantSkills,
+      nodeDocumentation,
     });
 
     // Send to Slack for approval

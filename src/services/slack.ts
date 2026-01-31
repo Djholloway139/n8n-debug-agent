@@ -3,7 +3,7 @@ const { App, LogLevel } = pkg;
 import type { KnownBlock, App as AppType } from '@slack/bolt';
 import { config } from '../utils/config.js';
 import { logger } from '../utils/logger.js';
-import type { ErrorAnalysis, ApprovalRecord } from '../types/index.js';
+import type { ErrorAnalysis, ApprovalRecord, ConversationMessage } from '../types/index.js';
 
 export class SlackClient {
   private app: AppType | null = null;
@@ -243,9 +243,82 @@ export class SlackClient {
     }
   }
 
-  async openSuggestionModal(triggerId: string, approvalId: string): Promise<void> {
+  async openSuggestionModal(
+    triggerId: string,
+    approvalId: string,
+    conversationHistory?: ConversationMessage[]
+  ): Promise<void> {
     const ready = await this.initialize();
     if (!ready) return;
+
+    const blocks: KnownBlock[] = [];
+
+    // If there's conversation history, show a summary
+    if (conversationHistory && conversationHistory.length > 0) {
+      blocks.push({
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: '*Conversation so far:*',
+        },
+      });
+
+      // Show last few messages (truncated)
+      const recentMessages = conversationHistory.slice(-4);
+      for (const msg of recentMessages) {
+        const icon = msg.role === 'user' ? ':bust_in_silhouette:' : ':robot_face:';
+        const content = msg.content.length > 150 ? msg.content.slice(0, 150) + '...' : msg.content;
+        blocks.push({
+          type: 'context',
+          elements: [
+            {
+              type: 'mrkdwn',
+              text: `${icon} ${content}`,
+            },
+          ],
+        });
+      }
+
+      blocks.push({
+        type: 'divider',
+      });
+
+      blocks.push({
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: 'Continue the conversation or ask another question:',
+        },
+      });
+    } else {
+      blocks.push({
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: 'Ask a question about n8n capabilities or discuss the proposed fix. You can have a back-and-forth conversation before requesting a new proposal.',
+        },
+      });
+    }
+
+    blocks.push({
+      type: 'input',
+      block_id: 'suggestion_input',
+      element: {
+        type: 'plain_text_input',
+        action_id: 'suggestion_text',
+        multiline: true,
+        placeholder: {
+          type: 'plain_text',
+          text: conversationHistory && conversationHistory.length > 0
+            ? 'Continue the conversation...'
+            : 'e.g., "Does the GitHub node have a Continue on Fail option?" or "What error handling options are available for this node?"',
+        },
+      },
+      label: {
+        type: 'plain_text',
+        text: 'Your Message',
+      },
+    });
 
     try {
       await this.getApp().client.views.open({
@@ -255,49 +328,228 @@ export class SlackClient {
           callback_id: `suggestion_modal_${approvalId}`,
           title: {
             type: 'plain_text',
-            text: 'Suggest a Fix',
+            text: conversationHistory && conversationHistory.length > 0 ? 'Continue Chat' : 'Ask a Question',
           },
           submit: {
             type: 'plain_text',
-            text: 'Submit',
+            text: 'Send',
           },
           close: {
             type: 'plain_text',
             text: 'Cancel',
           },
-          blocks: [
-            {
-              type: 'section',
-              text: {
-                type: 'mrkdwn',
-                text: 'Describe your suggested fix or provide feedback on the proposed solution:',
-              },
-            },
-            {
-              type: 'input',
-              block_id: 'suggestion_input',
-              element: {
-                type: 'plain_text_input',
-                action_id: 'suggestion_text',
-                multiline: true,
-                placeholder: {
-                  type: 'plain_text',
-                  text: 'e.g., "Instead of modifying the JSON body, try adding error handling around the HTTP request" or "The real issue is the API endpoint URL is wrong"',
-                },
-              },
-              label: {
-                type: 'plain_text',
-                text: 'Your Suggestion',
-              },
-            },
-          ],
+          blocks,
           private_metadata: approvalId,
         },
       });
 
-      logger.info('Suggestion modal opened', { approvalId });
+      logger.info('Suggestion modal opened', { approvalId, hasConversation: !!(conversationHistory?.length) });
     } catch (error) {
       logger.error('Failed to open suggestion modal', { error: (error as Error).message });
+    }
+  }
+
+  async postConversationReply(
+    channel: string,
+    threadTs: string,
+    approvalId: string,
+    userMessage: string,
+    agentReply: string,
+    relevantDocs?: string
+  ): Promise<void> {
+    const ready = await this.initialize();
+    if (!ready) return;
+
+    const blocks: KnownBlock[] = [
+      {
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: `:bust_in_silhouette: *You asked:*\n>${userMessage.split('\n').join('\n>')}`,
+        },
+      },
+      {
+        type: 'divider',
+      },
+      {
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: `:robot_face: *Agent:*\n${agentReply}`,
+        },
+      },
+    ];
+
+    // Add relevant documentation if provided
+    if (relevantDocs) {
+      blocks.push({
+        type: 'context',
+        elements: [
+          {
+            type: 'mrkdwn',
+            text: `:books: *Documentation referenced:*\n${relevantDocs.slice(0, 500)}${relevantDocs.length > 500 ? '...' : ''}`,
+          },
+        ],
+      });
+    }
+
+    // Add action buttons for conversation flow
+    blocks.push({
+      type: 'actions',
+      block_id: `conversation_${approvalId}`,
+      elements: [
+        {
+          type: 'button',
+          text: {
+            type: 'plain_text',
+            text: ':speech_balloon: Continue Chat',
+            emoji: true,
+          },
+          action_id: 'continue_conversation',
+          value: approvalId,
+        },
+        {
+          type: 'button',
+          text: {
+            type: 'plain_text',
+            text: ':bulb: Request New Proposal',
+            emoji: true,
+          },
+          style: 'primary',
+          action_id: 'request_proposal',
+          value: approvalId,
+        },
+        {
+          type: 'button',
+          text: {
+            type: 'plain_text',
+            text: ':white_check_mark: Approve Current',
+            emoji: true,
+          },
+          action_id: 'approve_fix',
+          value: approvalId,
+        },
+        {
+          type: 'button',
+          text: {
+            type: 'plain_text',
+            text: ':x: Reject',
+            emoji: true,
+          },
+          style: 'danger',
+          action_id: 'reject_fix',
+          value: approvalId,
+        },
+      ],
+    });
+
+    try {
+      await this.getApp().client.chat.postMessage({
+        channel,
+        thread_ts: threadTs,
+        text: `Conversation reply`,
+        blocks,
+      });
+
+      logger.info('Conversation reply posted', { approvalId, channel });
+    } catch (error) {
+      logger.error('Failed to post conversation reply', { error: (error as Error).message });
+    }
+  }
+
+  async openProposalRequestModal(
+    triggerId: string,
+    approvalId: string,
+    conversationHistory?: ConversationMessage[]
+  ): Promise<void> {
+    const ready = await this.initialize();
+    if (!ready) return;
+
+    const blocks: KnownBlock[] = [];
+
+    // Show conversation summary
+    if (conversationHistory && conversationHistory.length > 0) {
+      blocks.push({
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: '*Based on your conversation:*',
+        },
+      });
+
+      // Show conversation summary
+      const recentMessages = conversationHistory.slice(-6);
+      for (const msg of recentMessages) {
+        const icon = msg.role === 'user' ? ':bust_in_silhouette:' : ':robot_face:';
+        const content = msg.content.length > 100 ? msg.content.slice(0, 100) + '...' : msg.content;
+        blocks.push({
+          type: 'context',
+          elements: [
+            {
+              type: 'mrkdwn',
+              text: `${icon} ${content}`,
+            },
+          ],
+        });
+      }
+
+      blocks.push({
+        type: 'divider',
+      });
+    }
+
+    blocks.push({
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: 'Provide any final guidance for the new proposal. The agent will use your conversation and this message to generate a revised fix.',
+      },
+    });
+
+    blocks.push({
+      type: 'input',
+      block_id: 'proposal_request_input',
+      element: {
+        type: 'plain_text_input',
+        action_id: 'proposal_request_text',
+        multiline: true,
+        placeholder: {
+          type: 'plain_text',
+          text: 'e.g., "Based on our discussion, use the If node approach for error handling" or "Please create the fix we discussed"',
+        },
+      },
+      label: {
+        type: 'plain_text',
+        text: 'Proposal Instructions',
+      },
+    });
+
+    try {
+      await this.getApp().client.views.open({
+        trigger_id: triggerId,
+        view: {
+          type: 'modal',
+          callback_id: `proposal_request_modal_${approvalId}`,
+          title: {
+            type: 'plain_text',
+            text: 'Request New Proposal',
+          },
+          submit: {
+            type: 'plain_text',
+            text: 'Generate Proposal',
+          },
+          close: {
+            type: 'plain_text',
+            text: 'Cancel',
+          },
+          blocks,
+          private_metadata: approvalId,
+        },
+      });
+
+      logger.info('Proposal request modal opened', { approvalId });
+    } catch (error) {
+      logger.error('Failed to open proposal request modal', { error: (error as Error).message });
     }
   }
 

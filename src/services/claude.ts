@@ -8,6 +8,7 @@ import type {
   WorkflowData,
   WorkflowChange,
   N8nSkill,
+  ConversationMessage,
 } from '../types/index.js';
 
 const SYSTEM_PROMPT = `You are an expert n8n workflow debugging assistant. Your role is to analyze workflow errors and propose fixes.
@@ -263,17 +264,23 @@ Use the provide_analysis tool to return your structured response.`;
   async reviseFix(context: {
     originalAnalysis: ErrorAnalysis;
     userSuggestion: string;
-    errorPayload: import('../types/index.js').ErrorPayload;
-    workflow: import('../types/index.js').WorkflowData;
+    errorPayload: ErrorPayload;
+    workflow: WorkflowData;
+    skills?: N8nSkill[];
+    nodeDocumentation?: string;
+    conversationHistory?: ConversationMessage[];
   }): Promise<ErrorAnalysis> {
-    const { originalAnalysis, userSuggestion, errorPayload, workflow } = context;
+    const { originalAnalysis, userSuggestion, errorPayload, workflow, skills, nodeDocumentation, conversationHistory } = context;
 
     logger.info('Revising fix based on user suggestion', {
       workflowId: workflow.id,
       suggestion: userSuggestion.slice(0, 100),
+      hasSkills: !!skills?.length,
+      hasNodeDocs: !!nodeDocumentation,
+      conversationLength: conversationHistory?.length || 0,
     });
 
-    const prompt = `## Original Error
+    let prompt = `## Original Error
 
 **Workflow:** ${workflow.name}
 **Error:** ${errorPayload.errorMessage}
@@ -287,12 +294,6 @@ Use the provide_analysis tool to return your structured response.`;
 **Changes:**
 ${originalAnalysis.suggestedFix.changes.map((c) => `- [${c.changeType}] ${c.description}`).join('\n')}
 
-## User Feedback
-
-The user has provided the following suggestion or feedback on the proposed fix:
-
-"${userSuggestion}"
-
 ## Workflow Structure
 
 **Nodes:**
@@ -302,13 +303,50 @@ ${workflow.nodes.map((n) => `- ${n.name} (${n.type})`).join('\n')}
 \`\`\`json
 ${JSON.stringify(workflow.nodes.find((n) => n.name === errorPayload.nodeName)?.parameters || {}, null, 2).slice(0, 1500)}
 \`\`\`
+`;
+
+    // Add relevant skills documentation
+    if (skills && skills.length > 0) {
+      prompt += `\n## Relevant n8n Documentation\n\n`;
+      for (const skill of skills) {
+        prompt += `### ${skill.name}\n${skill.description}\n\n`;
+        if (skill.content) {
+          prompt += `${skill.content.slice(0, 500)}...\n\n`;
+        }
+      }
+    }
+
+    // Add MCP node documentation if available
+    if (nodeDocumentation) {
+      prompt += `\n## Node Documentation (from n8n MCP)\n\n`;
+      prompt += `${nodeDocumentation}\n\n`;
+    }
+
+    // Add conversation history if available
+    if (conversationHistory && conversationHistory.length > 0) {
+      prompt += `\n## Previous Conversation\n\n`;
+      prompt += `The user has been discussing this issue with the agent. Here is the conversation so far:\n\n`;
+      for (const msg of conversationHistory) {
+        const role = msg.role === 'user' ? 'User' : 'Agent';
+        prompt += `**${role}:** ${msg.content}\n\n`;
+      }
+    }
+
+    prompt += `## User's Request for New Proposal
+
+The user has requested a new fix proposal based on the conversation:
+
+"${userSuggestion}"
 
 ## Task
 
-Based on the user's feedback, revise your analysis and proposed fix. Consider:
-1. Whether the user's suggestion addresses the root cause better
-2. How to incorporate their feedback into a concrete fix
-3. Any additional changes needed based on their insight
+Based on the conversation and the user's final request, create a revised fix proposal.
+
+CRITICAL REQUIREMENTS:
+1. ONLY suggest features and options that are documented in the n8n documentation above
+2. If the documentation doesn't mention a feature, DO NOT suggest it exists
+3. If you're unsure about a capability, indicate lower confidence and suggest alternative approaches
+4. Focus on concrete, actionable changes that can be verified against the documentation
 
 Provide a revised analysis using the provide_analysis tool.`;
 
@@ -383,6 +421,131 @@ Provide a revised analysis using the provide_analysis tool.`;
       };
     } catch (error) {
       logger.error('Claude revision failed', { error: (error as Error).message });
+      throw error;
+    }
+  }
+
+  async generateConversationReply(context: {
+    errorPayload: ErrorPayload;
+    workflow: WorkflowData;
+    originalAnalysis: ErrorAnalysis;
+    skills?: N8nSkill[];
+    nodeDocumentation?: string;
+    conversationHistory: ConversationMessage[];
+    userMessage: string;
+  }): Promise<{ reply: string; relevantDocs?: string }> {
+    const { errorPayload, workflow, originalAnalysis, skills, nodeDocumentation, conversationHistory, userMessage } = context;
+
+    logger.info('Generating conversation reply', {
+      workflowId: workflow.id,
+      userMessage: userMessage.slice(0, 100),
+      conversationLength: conversationHistory.length,
+    });
+
+    let prompt = `## Context
+
+You are helping debug an n8n workflow error. The user is asking questions or discussing the issue with you.
+
+**Workflow:** ${workflow.name}
+**Error:** ${errorPayload.errorMessage}
+**Node:** ${errorPayload.nodeName || 'Unknown'}
+
+## Current Proposed Fix
+
+**Root Cause:** ${originalAnalysis.rootCause}
+**Explanation:** ${originalAnalysis.explanation}
+**Proposed Fix:** ${originalAnalysis.suggestedFix.description}
+`;
+
+    // Add relevant skills documentation
+    if (skills && skills.length > 0) {
+      prompt += `\n## Relevant n8n Documentation\n\n`;
+      for (const skill of skills) {
+        prompt += `### ${skill.name}\n${skill.description}\n\n`;
+        if (skill.content) {
+          prompt += `${skill.content.slice(0, 800)}...\n\n`;
+        }
+      }
+    }
+
+    // Add MCP node documentation if available
+    if (nodeDocumentation) {
+      prompt += `\n## Node Documentation (from n8n MCP)\n\n`;
+      prompt += `${nodeDocumentation}\n\n`;
+    }
+
+    // Add conversation history
+    if (conversationHistory.length > 0) {
+      prompt += `\n## Conversation So Far\n\n`;
+      for (const msg of conversationHistory) {
+        const role = msg.role === 'user' ? 'User' : 'You';
+        prompt += `**${role}:** ${msg.content}\n\n`;
+      }
+    }
+
+    prompt += `## User's Latest Message
+
+"${userMessage}"
+
+## Your Task
+
+Respond to the user's message. Important guidelines:
+
+1. **Be accurate**: Only reference features that exist in the documentation provided above
+2. **Quote documentation**: When answering about n8n capabilities, cite specific documentation
+3. **Be honest**: If you're unsure whether a feature exists, say so clearly
+4. **Be helpful**: Guide the user toward a solution that will actually work
+5. **Don't generate fixes yet**: This is a conversation - the user will click "Request New Proposal" when ready for a fix
+
+If the user is asking whether a feature exists:
+- Check the documentation provided
+- If it's documented, confirm and quote the relevant section
+- If it's NOT documented, say so clearly and suggest alternatives
+
+Provide your response using the provide_conversation_reply tool.`;
+
+    try {
+      const response = await this.client.messages.create({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 2048,
+        system: `You are an expert n8n workflow debugging assistant having a conversation with a user. You help them understand their workflow error and explore solutions. Be conversational, accurate, and helpful. Never invent features that don't exist in the documentation - if you're not sure about something, say so.`,
+        messages: [{ role: 'user', content: prompt }],
+        tools: [
+          {
+            name: 'provide_conversation_reply',
+            description: 'Provide a conversational reply to the user',
+            input_schema: {
+              type: 'object',
+              properties: {
+                reply: {
+                  type: 'string',
+                  description: 'Your conversational response to the user',
+                },
+                relevantDocs: {
+                  type: 'string',
+                  description: 'Key documentation snippets that informed your answer (if any). Include specific quotes from the documentation.',
+                },
+              },
+              required: ['reply'],
+            },
+          },
+        ],
+        tool_choice: { type: 'tool', name: 'provide_conversation_reply' },
+      });
+
+      const toolUse = response.content.find((block) => block.type === 'tool_use');
+      if (!toolUse || toolUse.type !== 'tool_use') {
+        throw new Error('No tool use response from Claude');
+      }
+
+      const result = toolUse.input as { reply: string; relevantDocs?: string };
+
+      return {
+        reply: result.reply,
+        relevantDocs: result.relevantDocs,
+      };
+    } catch (error) {
+      logger.error('Claude conversation reply failed', { error: (error as Error).message });
       throw error;
     }
   }

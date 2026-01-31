@@ -44,8 +44,13 @@ interface SlackViewSubmissionPayload {
     private_metadata: string;
     state: {
       values: {
-        suggestion_input: {
+        suggestion_input?: {
           suggestion_text: {
+            value: string;
+          };
+        };
+        proposal_request_input?: {
+          proposal_request_text: {
             value: string;
           };
         };
@@ -81,10 +86,20 @@ slackRouter.post('/actions', async (req: Request, res: Response) => {
     // Acknowledge immediately for modals
     res.status(200).send();
 
-    // Process the suggestion asynchronously
-    processSuggestion(payload as SlackViewSubmissionPayload).catch((error) => {
-      logger.error('Failed to process suggestion', { error: (error as Error).message });
-    });
+    const viewPayload = payload as SlackViewSubmissionPayload;
+    const callbackId = viewPayload.view.callback_id;
+
+    // Route to appropriate handler based on callback_id
+    if (callbackId.startsWith('proposal_request_modal_')) {
+      processProposalRequest(viewPayload).catch((error) => {
+        logger.error('Failed to process proposal request', { error: (error as Error).message });
+      });
+    } else {
+      // Default: process as conversation message
+      processSuggestion(viewPayload).catch((error) => {
+        logger.error('Failed to process suggestion', { error: (error as Error).message });
+      });
+    }
     return;
   }
 
@@ -130,24 +145,55 @@ async function processAction(payload: SlackActionPayload): Promise<void> {
     await handleApproval(record.id, payload);
   } else if (actionId === 'reject_fix') {
     await handleRejection(record.id, payload);
-  } else if (actionId === 'suggest_fix') {
+  } else if (actionId === 'suggest_fix' || actionId === 'continue_conversation') {
     await handleSuggestFix(record.id, payload);
+  } else if (actionId === 'request_proposal') {
+    await handleRequestProposal(record.id, payload);
   } else {
     logger.warn('Unknown action', { actionId });
   }
 }
 
 async function handleSuggestFix(approvalId: string, payload: SlackActionPayload): Promise<void> {
-  logger.info('Opening suggestion modal', { approvalId, user: payload.user.username });
+  const record = approvalStore.get(approvalId);
+  logger.info('Opening suggestion modal', {
+    approvalId,
+    user: payload.user.username,
+    hasConversation: !!(record?.conversationHistory?.length),
+  });
 
-  await slackClient.openSuggestionModal(payload.trigger_id, approvalId);
+  await slackClient.openSuggestionModal(
+    payload.trigger_id,
+    approvalId,
+    record?.conversationHistory
+  );
+}
+
+async function handleRequestProposal(approvalId: string, payload: SlackActionPayload): Promise<void> {
+  const record = approvalStore.get(approvalId);
+  logger.info('Opening proposal request modal', {
+    approvalId,
+    user: payload.user.username,
+    conversationLength: record?.conversationHistory?.length || 0,
+  });
+
+  await slackClient.openProposalRequestModal(
+    payload.trigger_id,
+    approvalId,
+    record?.conversationHistory
+  );
 }
 
 async function processSuggestion(payload: SlackViewSubmissionPayload): Promise<void> {
   const approvalId = payload.view.private_metadata;
-  const suggestion = payload.view.state.values.suggestion_input.suggestion_text.value;
+  const userMessage = payload.view.state.values.suggestion_input?.suggestion_text.value;
 
-  logger.info('Processing user suggestion', { approvalId, user: payload.user.username });
+  if (!userMessage) {
+    logger.warn('No message in suggestion payload', { approvalId });
+    return;
+  }
+
+  logger.info('Processing user conversation message', { approvalId, user: payload.user.username });
 
   const record = approvalStore.get(approvalId);
   if (!record) {
@@ -156,18 +202,85 @@ async function processSuggestion(payload: SlackViewSubmissionPayload): Promise<v
   }
 
   try {
-    // Use Claude to analyze the suggestion and create a revised fix
-    const revisedAnalysis = await claudeClient.reviseFix({
-      originalAnalysis: record.analysis,
-      userSuggestion: suggestion,
+    // Get current conversation history
+    const conversationHistory = record.conversationHistory || [];
+
+    // Generate a conversational reply using Claude
+    const response = await claudeClient.generateConversationReply({
       errorPayload: record.errorPayload,
       workflow: record.originalWorkflow,
+      originalAnalysis: record.analysis,
+      skills: record.skills,
+      nodeDocumentation: record.nodeDocumentation,
+      conversationHistory,
+      userMessage,
+    });
+
+    // Update conversation history
+    const updatedHistory = [
+      ...conversationHistory,
+      { role: 'user' as const, content: userMessage, timestamp: new Date() },
+      { role: 'assistant' as const, content: response.reply, timestamp: new Date() },
+    ];
+
+    approvalStore.update(approvalId, {
+      conversationHistory: updatedHistory,
+    });
+
+    // Post the conversation reply to the thread
+    await slackClient.postConversationReply(
+      record.slackChannelId!,
+      record.slackMessageTs!,
+      approvalId,
+      userMessage,
+      response.reply,
+      response.relevantDocs
+    );
+
+    logger.info('Conversation reply posted', { approvalId, conversationLength: updatedHistory.length });
+  } catch (error) {
+    logger.error('Failed to process conversation message', { approvalId, error: (error as Error).message });
+
+    // Notify user of failure in thread
+    await slackClient.updateMessage(
+      record.slackChannelId!,
+      record.slackMessageTs!,
+      'failed',
+      `Failed to process your message: ${(error as Error).message}`
+    );
+  }
+}
+
+async function processProposalRequest(payload: SlackViewSubmissionPayload): Promise<void> {
+  const approvalId = payload.view.private_metadata;
+  const userRequest = payload.view.state.values.proposal_request_input?.proposal_request_text.value || 'Please generate a new proposal based on our conversation.';
+
+  logger.info('Processing proposal request', { approvalId, user: payload.user.username });
+
+  const record = approvalStore.get(approvalId);
+  if (!record) {
+    logger.warn('Approval record not found for proposal request', { approvalId });
+    return;
+  }
+
+  try {
+    // Use Claude to generate a revised fix with full context
+    const revisedAnalysis = await claudeClient.reviseFix({
+      originalAnalysis: record.analysis,
+      userSuggestion: userRequest,
+      errorPayload: record.errorPayload,
+      workflow: record.originalWorkflow,
+      skills: record.skills,
+      nodeDocumentation: record.nodeDocumentation,
+      conversationHistory: record.conversationHistory,
     });
 
     // Update the approval record with the revised analysis
+    // Clear conversation history since we're starting fresh with a new proposal
     approvalStore.update(approvalId, {
       analysis: revisedAnalysis,
       proposal: revisedAnalysis.suggestedFix,
+      conversationHistory: [],
     });
 
     // Post the revised proposal to the thread
@@ -175,21 +288,24 @@ async function processSuggestion(payload: SlackViewSubmissionPayload): Promise<v
       record.slackChannelId!,
       record.slackMessageTs!,
       approvalId,
-      suggestion,
+      userRequest,
       revisedAnalysis.explanation,
       revisedAnalysis.suggestedFix.changes.map((c, i) => `${i + 1}. [${c.changeType}] ${c.description}`).join('\n')
     );
 
-    logger.info('Revised proposal posted', { approvalId });
+    logger.info('Revised proposal posted from conversation', {
+      approvalId,
+      conversationMessagesUsed: record.conversationHistory?.length || 0,
+    });
   } catch (error) {
-    logger.error('Failed to process suggestion', { approvalId, error: (error as Error).message });
+    logger.error('Failed to generate proposal from conversation', { approvalId, error: (error as Error).message });
 
     // Notify user of failure in thread
     await slackClient.updateMessage(
       record.slackChannelId!,
       record.slackMessageTs!,
       'failed',
-      `Failed to process your suggestion: ${(error as Error).message}`
+      `Failed to generate new proposal: ${(error as Error).message}`
     );
   }
 }

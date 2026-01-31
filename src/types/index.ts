@@ -94,6 +94,13 @@ export interface ExecutionData {
   };
 }
 
+// Conversation message in suggestion flow
+export interface ConversationMessage {
+  role: 'user' | 'assistant';
+  content: string;
+  timestamp: Date;
+}
+
 // Approval record stored in memory
 export interface ApprovalRecord {
   id: string;
@@ -109,6 +116,9 @@ export interface ApprovalRecord {
   expiresAt: Date;
   slackMessageTs?: string;
   slackChannelId?: string;
+  skills?: N8nSkill[];
+  nodeDocumentation?: string;
+  conversationHistory?: ConversationMessage[];
 }
 
 // n8n Skills from GitHub
